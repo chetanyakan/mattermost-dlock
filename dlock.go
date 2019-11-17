@@ -124,8 +124,10 @@ func (d *DLock) Lock(options ...Option) error {
 	}
 	conf := d.createConfig(options...)
 	for {
-		_, aerr := d.store.KVSetWithOptions(d.key, true, kopts)
-		isLockObtained := aerr == nil
+		isLockObtained, aerr := d.store.KVSetWithOptions(d.key, true, kopts)
+		if aerr != nil {
+			return normalizeAppErr(aerr)
+		}
 		if isLockObtained {
 			d.startRefreshLoop()
 			return nil
