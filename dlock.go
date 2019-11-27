@@ -6,11 +6,12 @@ package dlock
 
 import (
 	"context"
-	"errors"
+
 	"sync"
 	"time"
 
 	"github.com/mattermost/mattermost-server/model"
+	"github.com/pkg/errors"
 )
 
 const (
@@ -50,39 +51,11 @@ type DLock struct {
 	// key to lock for.
 	key string
 
-	// defaultOptions are overwritten by call to Lock() or RLock().
-	defaultOptions []Option
-
 	// refreshCancel stops refreshing lock's TTL.
 	refreshCancel context.CancelFunc
 
 	// refreshWait is a waiter to make sure refreshing is finished.
 	refreshWait *sync.WaitGroup
-}
-
-// configuration keeps lock configurations.
-type configuration struct {
-	ctx               context.Context
-	obtainImmediately bool
-}
-
-// Option modifies configuration.
-type Option func(*configuration)
-
-// ContextOption provides a context to locking. when ctx is cancelled,
-// Lock() will stop blocking and return with error.
-func ContextOption(ctx context.Context) Option {
-	return func(c *configuration) {
-		c.ctx = ctx
-	}
-}
-
-// ObtainImmediatelyOption tries to Lock() immediately.
-// if cannot, Lock() will return with an error.
-func ObtainImmediatelyOption() Option {
-	return func(c *configuration) {
-		c.obtainImmediately = true
-	}
 }
 
 // New creates a new distributed lock for key on given store with options.
@@ -91,57 +64,58 @@ func ObtainImmediatelyOption() Option {
 // as an equivalent of,
 //   `var m sync.Mutex`
 // and use it in the same way.
-func New(key string, store Store, options ...Option) *DLock {
-	d := &DLock{
-		key:            buildKey(key),
-		defaultOptions: options,
-		store:          store,
+func New(key string, store Store) *DLock {
+	return &DLock{
+		key:   buildKey(key),
+		store: store,
 	}
-	return d
-}
-
-// createConfig creates a new config by merging options with default ones.
-func (d *DLock) createConfig(options ...Option) *configuration {
-	c := &configuration{}
-	options = append(d.defaultOptions, options...)
-	for _, o := range options {
-		o(c)
-	}
-	if c.ctx == nil {
-		c.ctx = context.Background()
-	}
-	return c
 }
 
 // Lock obtains a new lock.
+// ctx provides a context to locking. when ctx is cancelled, Lock() will stop
+// blocking and retries and return with error.
 // use Lock() exactly like sync.Mutex.Lock(), avoid missuses like deadlocks.
-func (d *DLock) Lock(options ...Option) error {
+func (d *DLock) Lock(ctx context.Context) error {
+	for {
+		isLockObtained, err := d.lock()
+		if err != nil {
+			return err
+		}
+		if isLockObtained {
+			return nil
+		}
+		afterC := time.After(lockTryInterval)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-afterC:
+		}
+	}
+}
+
+// TryLock tries to obtain the lock immediately.
+// err is only filled on system failure.
+func (d *DLock) TryLock() (isLockObtained bool, err error) {
+	return d.lock()
+}
+
+// lock obtains a new lock and starts refreshing the lock until a call to
+// Unlock() to not hit lock's TTL.
+func (d *DLock) lock() (isLockObtained bool, err error) {
 	kopts := model.PluginKVSetOptions{
 		EncodeJSON:      true,
 		Atomic:          true,
 		OldValue:        nil,
 		ExpireInSeconds: int64(lockTTL.Seconds()),
 	}
-	conf := d.createConfig(options...)
-	for {
-		isLockObtained, aerr := d.store.KVSetWithOptions(d.key, true, kopts)
-		if aerr != nil {
-			return normalizeAppErr(aerr)
-		}
-		if isLockObtained {
-			d.startRefreshLoop()
-			return nil
-		}
-		if conf.obtainImmediately {
-			return ErrCouldntObtainImmediately
-		}
-		afterC := time.After(lockTryInterval)
-		select {
-		case <-conf.ctx.Done():
-			return conf.ctx.Err()
-		case <-afterC:
-		}
+	isLockObtained, aerr := d.store.KVSetWithOptions(d.key, true, kopts)
+	if aerr != nil {
+		return false, errors.Wrap(aerr, "KVSetWithOptions() error, cannot lock")
 	}
+	if isLockObtained {
+		d.startRefreshLoop()
+	}
+	return isLockObtained, nil
 }
 
 // startRefreshLoop refreshes an obtained lock to not get caught by lock's TTL.
@@ -178,10 +152,6 @@ func (d *DLock) Unlock() error {
 	aerr := d.store.KVDelete(d.key)
 	return normalizeAppErr(aerr)
 }
-
-func (d *DLock) RLock(options ...Option) error { panic("unimplemented") }
-
-func (d *DLock) RUnlock() error { panic("unimplemented") }
 
 // buildKey builds a lock key for KV store.
 func buildKey(key string) string {

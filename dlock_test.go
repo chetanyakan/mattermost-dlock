@@ -1,6 +1,7 @@
 package dlock
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ func TestLock(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < 10; i++ {
-				dl.Lock()
+				dl.Lock(context.Background())
 				time.Sleep(100 * time.Microsecond)
 				dl.Unlock()
 			}
@@ -29,18 +30,19 @@ func TestLock(t *testing.T) {
 	wg.Wait()
 }
 
-func TestLockObtainImmediately(t *testing.T) {
+func TestTryLock(t *testing.T) {
 	dl := New("a", dlocktest.NewStore())
-	dl.Lock()
-	err := dl.Lock(ObtainImmediatelyOption())
-	require.Equal(t, ErrCouldntObtainImmediately, err)
+	dl.Lock(context.Background())
+	isLockObtained, err := dl.TryLock()
+	require.NoError(t, err)
+	require.False(t, isLockObtained)
 }
 
 func TestLockDifferentKeys(t *testing.T) {
 	dla := New("a", dlocktest.NewStore())
 	dlb := New("b", dlocktest.NewStore())
-	dla.Lock()
-	dlb.Lock()
+	dla.Lock(context.Background())
+	dlb.Lock(context.Background())
 	dla.Unlock()
 	dlb.Unlock()
 }
