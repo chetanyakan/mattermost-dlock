@@ -153,10 +153,6 @@ func (d *DLock) Unlock() error {
 	return normalizeAppErr(aerr)
 }
 
-func (d *DLock) RLock(ctx context.Context) error { panic("unimplemented") }
-
-func (d *DLock) RUnlock() error { panic("unimplemented") }
-
 // buildKey builds a lock key for KV store.
 func buildKey(key string) string {
 	return storePrefix + key
